@@ -1,0 +1,5 @@
+{
+  "name": "WordPress SEO & Geo-Targeted URL Slug Optimizer",
+  "description": "An AI-powered tool to generate SEO-friendly and geo-targeted URL slugs for WordPress sites, providing multiple expert-level implementation methods including a ready-to-install plugin, WP-CLI commands, and raw SQL scripts.",
+  "requestFramePermissions": []
+}
