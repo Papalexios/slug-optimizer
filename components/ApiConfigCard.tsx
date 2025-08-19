@@ -1,6 +1,6 @@
 import React from 'react';
-import { AIConfig, AIProvider, KeyValidationStatus } from '../types';
-import { AI_PROVIDERS, AI_MODELS } from '../constants';
+import { AIConfig, AIProvider, KeyValidationStatus } from '../types.ts';
+import { AI_PROVIDERS, AI_MODELS } from '../constants.ts';
 
 interface ApiConfigCardProps {
   config: AIConfig;

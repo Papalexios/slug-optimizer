@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { URLResult } from '../types';
-import { INITIAL_DISPLAY_COUNT } from '../constants';
+import { URLResult } from '../types.ts';
+import { INITIAL_DISPLAY_COUNT } from '../constants.ts';
 
 interface ResultsTableProps {
   results: URLResult[];

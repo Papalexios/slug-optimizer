@@ -1,17 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Header } from './components/Header';
-import { InputCard } from './components/InputCard';
-import { ResultsTable } from './components/ResultsTable';
-import { ExportCard } from './components/ExportCard';
-import { Toast } from './components/Toast';
-import { ApiConfigCard } from './components/ApiConfigCard';
-import { Footer } from './components/Footer';
-import { Hero } from './components/Hero';
-import { URLResult, ToastMessage, AIProvider, KeyValidationStatus, AIConfig } from './types';
-import { optimizeSlugs } from './services/aiService';
-import { fetchUrlsFromSitemap } from './services/sitemapService';
-import { URL_BATCH_SIZE, AI_PROVIDERS, AI_MODELS } from './constants';
-import { validateApiKey } from './services/validationService';
+import { Header } from './components/Header.tsx';
+import { InputCard } from './components/InputCard.tsx';
+import { ResultsTable } from './components/ResultsTable.tsx';
+import { ExportCard } from './components/ExportCard.tsx';
+import { Toast } from './components/Toast.tsx';
+import { ApiConfigCard } from './components/ApiConfigCard.tsx';
+import { Footer } from './components/Footer.tsx';
+import { Hero } from './components/Hero.tsx';
+import { URLResult, ToastMessage, AIProvider, KeyValidationStatus, AIConfig } from './types.ts';
+import { optimizeSlugs } from './services/aiService.ts';
+import { fetchUrlsFromSitemap } from './services/sitemapService.ts';
+import { URL_BATCH_SIZE, AI_PROVIDERS, AI_MODELS } from './constants.ts';
+import { validateApiKey } from './services/validationService.ts';
 
 // Helper to get initial config from localStorage
 const getInitialConfig = (): AIConfig => {

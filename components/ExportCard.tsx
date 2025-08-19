@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { URLResult, ExportType } from '../types';
-import { generatePluginZip, generateWpCliCommands, generateSqlScript } from '../services/exportService';
-import { Modal } from './Modal';
+import { URLResult, ExportType } from '../types.ts';
+import { generatePluginZip, generateWpCliCommands, generateSqlScript } from '../services/exportService.ts';
+import { Modal } from './Modal.tsx';
 
 interface ExportCardProps {
   results: URLResult[];

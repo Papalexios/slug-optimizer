@@ -1,5 +1,5 @@
 
-import { URLResult } from '../types';
+import { URLResult } from '../types.ts';
 
 // These are declared because they are loaded from CDN
 declare const JSZip: any;

@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { AIProvider } from "../types";
+import { AIProvider } from "../types.ts";
 
 const validateGeminiKey = async (apiKey: string): Promise<boolean> => {
     try {

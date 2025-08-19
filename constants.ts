@@ -1,4 +1,4 @@
-import { AIProvider } from './types';
+import { AIProvider } from './types.ts';
 
 export const URL_BATCH_SIZE = 50;
 export const INITIAL_DISPLAY_COUNT = 50;

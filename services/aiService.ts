@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { URLResult, AIConfig } from '../types';
+import { URLResult, AIConfig } from '../types.ts';
 
 const getSlug = (url: string): string => {
   try {
