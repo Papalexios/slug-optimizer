@@ -66,6 +66,13 @@ const App: React.FC = () => {
     localStorage.setItem('keyValidationStatus', JSON.stringify(keyValidationStatus));
   }, [keyValidationStatus]);
 
+  // Automatically set Gemini provider as valid, since its key is from environment.
+  useEffect(() => {
+    if (aiConfig.provider === 'gemini') {
+        setKeyValidationStatus(prev => ({ ...prev, gemini: 'valid' }));
+    }
+  }, [aiConfig.provider]);
+
 
   const toggleDarkMode = () => setIsDarkMode(prev => !prev);
   

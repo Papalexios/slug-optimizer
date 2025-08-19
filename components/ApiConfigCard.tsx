@@ -68,35 +68,49 @@ export const ApiConfigCard: React.FC<ApiConfigCardProps> = ({ config, setConfig,
         </div>
       </div>
       <div className="mt-4">
-        <label htmlFor="apiKey" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">
-          {AI_PROVIDERS.find(p => p.id === currentProvider)?.name} API Key
-        </label>
-        <div className="flex items-center gap-2">
-          <input
-            id="apiKey"
-            type="password"
-            value={config.apiKey}
-            onChange={(e) => setConfig(prev => ({...prev, apiKey: e.target.value}))}
-            className="flex-grow p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary"
-            placeholder="Enter your API key"
-          />
-           <div className="flex-shrink-0 w-28 text-center">
-            <button
-                onClick={() => onValidate(currentProvider, config.apiKey)}
-                disabled={!config.apiKey || currentStatus === 'validating'}
-                className="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-light-primary hover:bg-light-primary-hover dark:bg-dark-primary dark:hover:bg-dark-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary disabled:bg-gray-400"
-            >
-                {currentStatus === 'validating' ? <ValidatingIcon/> : 'Validate'}
-            </button>
-           </div>
-           <div className="w-20 flex items-center gap-2 text-sm">
-                {currentStatus === 'valid' && <><ValidIcon /> <span className="text-light-success dark:text-dark-success">Valid</span></>}
-                {currentStatus === 'invalid' && <><InvalidIcon /> <span className="text-light-danger dark:text-dark-danger">Invalid</span></>}
-           </div>
-        </div>
-         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-            Your API key is stored securely in your browser's local storage and is never sent to our servers.
-          </p>
+        {currentProvider === 'gemini' ? (
+          <div className="bg-blue-50 dark:bg-sky-900/30 border border-blue-200 dark:border-sky-700 text-blue-800 dark:text-sky-200 px-4 py-3 rounded-lg" role="alert">
+            <div className="flex">
+                <div className="py-1"><svg className="fill-current h-6 w-6 text-blue-500 dark:text-sky-400 mr-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M2.93 17.07A10 10 0 1 1 17.07 2.93 10 10 0 0 1 2.93 17.07zM9 11v4h2v-4H9zm0-4h2v2H9V7z"/></svg></div>
+                <div>
+                    <p className="font-bold">Google Gemini is Pre-configured</p>
+                    <p className="text-sm">The API key for Gemini is securely managed. No setup is required.</p>
+                </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <label htmlFor="apiKey" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">
+              {AI_PROVIDERS.find(p => p.id === currentProvider)?.name} API Key
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="apiKey"
+                type="password"
+                value={config.apiKey}
+                onChange={(e) => setConfig(prev => ({...prev, apiKey: e.target.value}))}
+                className="flex-grow p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary"
+                placeholder="Enter your API key"
+              />
+              <div className="flex-shrink-0 w-28 text-center">
+                <button
+                    onClick={() => onValidate(currentProvider, config.apiKey)}
+                    disabled={!config.apiKey || currentStatus === 'validating'}
+                    className="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-light-primary hover:bg-light-primary-hover dark:bg-dark-primary dark:hover:bg-dark-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary disabled:bg-gray-400"
+                >
+                    {currentStatus === 'validating' ? <ValidatingIcon/> : 'Validate'}
+                </button>
+              </div>
+              <div className="w-20 flex items-center gap-2 text-sm">
+                    {currentStatus === 'valid' && <><ValidIcon /> <span className="text-light-success dark:text-dark-success">Valid</span></>}
+                    {currentStatus === 'invalid' && <><InvalidIcon /> <span className="text-light-danger dark:text-dark-danger">Invalid</span></>}
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Your API key is stored securely in your browser's local storage and is never sent to our servers.
+              </p>
+          </>
+        )}
       </div>
     </div>
   );

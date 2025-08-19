@@ -1,19 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
 import { AIProvider } from "../types.ts";
-
-const validateGeminiKey = async (apiKey: string): Promise<boolean> => {
-    try {
-        const ai = new GoogleGenAI({ apiKey });
-        await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: 'test',
-        });
-        return true;
-    } catch (error) {
-        console.error("Gemini validation error:", error);
-        return false;
-    }
-};
 
 const validateOpenAIKey = async (apiKey: string, provider: 'openai' | 'openrouter'): Promise<boolean> => {
     const url = provider === 'openai' ? 'https://api.openai.com/v1/models' : 'https://openrouter.ai/api/v1/models';
@@ -55,11 +40,14 @@ const validateClaudeKey = async (apiKey: string): Promise<boolean> => {
 };
 
 export const validateApiKey = async (provider: AIProvider, apiKey: string): Promise<boolean> => {
+    if (provider === 'gemini') {
+        // Assume key is provided via environment variables and is always valid, per project setup.
+        return true;
+    }
+    
     if (!apiKey) return false;
 
     switch (provider) {
-        case 'gemini':
-            return await validateGeminiKey(apiKey);
         case 'openai':
             return await validateOpenAIKey(apiKey, 'openai');
         case 'openrouter':
