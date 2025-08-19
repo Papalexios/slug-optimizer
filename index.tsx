@@ -1,7 +1,1067 @@
 
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App.tsx';
+import { GoogleGenAI, Type } from "@google/genai";
+
+// =================================================================================
+// --- From types.ts ---
+// =================================================================================
+
+interface URLResult {
+  id: number;
+  originalUrl: string;
+  currentSlug: string;
+  proposedSlug: string;
+}
+
+enum ExportType {
+  PLUGIN = 'plugin',
+  WP_CLI = 'wp-cli',
+  SQL = 'sql',
+}
+
+interface ToastMessage {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
+
+type AIProvider = 'gemini' | 'openai' | 'claude' | 'openrouter';
+
+type KeyValidationStatus = 'idle' | 'validating' | 'valid' | 'invalid';
+
+interface AIConfig {
+  provider: AIProvider;
+  apiKey: string;
+  model: string;
+}
+
+// =================================================================================
+// --- From constants.ts ---
+// =================================================================================
+
+const URL_BATCH_SIZE = 50;
+const INITIAL_DISPLAY_COUNT = 50;
+
+const AI_PROVIDERS: { id: AIProvider; name: string }[] = [
+  { id: 'gemini', name: 'Google Gemini' },
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'claude', name: 'Anthropic Claude' },
+  { id: 'openrouter', name: 'OpenRouter' },
+];
+
+const AI_MODELS: Record<AIProvider, { value: string; name: string }[]> = {
+  gemini: [
+    { value: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+  ],
+  openai: [
+    { value: 'gpt-4o', name: 'GPT-4o' },
+    { value: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
+    { value: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
+  ],
+  claude: [
+    { value: 'claude-3-opus-20240229', name: 'Claude 3 Opus' },
+    { value: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet' },
+    { value: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku' },
+  ],
+  openrouter: [], // User-defined
+};
+
+// =================================================================================
+// --- From services/sitemapService.ts ---
+// =================================================================================
+
+const processedSitemaps = new Set<string>();
+const allUrls = new Set<string>();
+
+const parseAndExtractUrls = async (url: string): Promise<void> => {
+  if (processedSitemaps.has(url)) {
+    return;
+  }
+  processedSitemaps.add(url);
+
+  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+  const response = await fetch(proxyUrl);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch sitemap: ${response.statusText} (${response.status}) from ${url}`);
+  }
+
+  const xmlText = await response.text();
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+
+  const parserError = xmlDoc.querySelector('parsererror');
+  if (parserError) {
+    throw new Error(`Error parsing XML from ${url}. Make sure it is a valid XML sitemap.`);
+  }
+
+  const sitemapNodes = xmlDoc.querySelectorAll('sitemap > loc');
+  if (sitemapNodes.length > 0) {
+    const sitemapUrls = Array.from(sitemapNodes)
+      .map(node => node.textContent?.trim())
+      .filter((sitemapUrl): sitemapUrl is string => !!sitemapUrl);
+    
+    await Promise.all(sitemapUrls.map(sitemapUrl => parseAndExtractUrls(sitemapUrl)));
+    return;
+  }
+  
+  const urlNodes = xmlDoc.querySelectorAll('url > loc');
+  if (urlNodes.length > 0) {
+    urlNodes.forEach(node => {
+      if (node.textContent) {
+        allUrls.add(node.textContent.trim());
+      }
+    });
+    return;
+  }
+};
+
+const fetchUrlsFromSitemap = async (sitemapUrl: string): Promise<string[]> => {
+  processedSitemaps.clear();
+  allUrls.clear();
+
+  try {
+    await parseAndExtractUrls(sitemapUrl);
+    return Array.from(allUrls);
+  } catch (error) {
+    console.error("Sitemap crawling failed:", error);
+    if (error instanceof TypeError) {
+        throw new Error("Could not fetch sitemap. Please ensure the URL is correct and publicly accessible.");
+    }
+    throw error;
+  }
+};
+
+
+// =================================================================================
+// --- From services/exportService.ts ---
+// =================================================================================
+declare const JSZip: any;
+declare const saveAs: any;
+
+const sanitizeForPhp = (str: string) => str.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+
+const generatePluginPHP = (results: URLResult[]): string => {
+  const redirects = results
+    .map(r => {
+      const fromPath = new URL(r.originalUrl).pathname;
+      const toUrl = new URL(r.originalUrl);
+      toUrl.pathname = r.proposedSlug;
+      return `  '${sanitizeForPhp(fromPath)}' => '${sanitizeForPhp(toUrl.toString())}',`;
+    })
+    .join('\n');
+
+  return `<?php
+/**
+ * Plugin Name:       AI Geo-Targeted Slug Redirector
+ * Description:       Automatically redirects old URLs to new, SEO-optimized, geo-targeted URLs generated by the AI Slug Optimizer.
+ * Version:           1.0.0
+ * Author:            AI Slug Optimizer
+ */
+
+if (!defined('WPINC')) {
+    die;
+}
+
+add_action('template_redirect', function() {
+    $redirect_map = [
+${redirects}
+    ];
+
+    $request_uri = $_SERVER['REQUEST_URI'];
+    // Remove query string for matching
+    $request_path = strtok($request_uri, '?');
+
+    if (isset($redirect_map[$request_path])) {
+        $new_url = $redirect_map[$request_path];
+        // Append query string if it exists
+        if (strpos($request_uri, '?') !== false) {
+            $new_url .= '?' . substr(strrchr($request_uri, '?'), 1);
+        }
+        
+        wp_redirect($new_url, 301);
+        exit;
+    }
+});
+`;
+};
+
+const generatePluginZip = (results: URLResult[]): void => {
+  const phpContent = generatePluginPHP(results);
+  const zip = new JSZip();
+  zip.file('ai-slug-redirector/ai-slug-redirector.php', phpContent);
+  zip.generateAsync({ type: 'blob' }).then((content: any) => {
+    saveAs(content, 'ai-slug-redirector.zip');
+  });
+};
+
+const generateWpCliCommands = (results: URLResult[]): string => {
+  return results
+    .map(r => {
+      const newUrl = new URL(r.originalUrl);
+      newUrl.pathname = r.proposedSlug;
+      return `wp search-replace '${r.originalUrl}' '${newUrl.toString()}' --all-tables --report-changed-only`;
+    })
+    .join('\n');
+};
+
+const generateSqlScript = (results: URLResult[], dbPrefix: string = 'wp_'): string => {
+  const tables = [
+    'posts',
+    'postmeta',
+    'options',
+    'termmeta',
+    'usermeta',
+    'comments',
+  ];
+
+  const header = `-- IMPORTANT: BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT.
+-- This script performs a search and replace on core WordPress tables.
+-- Run at your own risk.
+
+`;
+
+  const queries = results
+    .map(r => {
+      const newUrl = new URL(r.originalUrl);
+      newUrl.pathname = r.proposedSlug;
+      const from = r.originalUrl;
+      const to = newUrl.toString();
+
+      return tables
+        .map(table => `UPDATE ${dbPrefix}${table} SET post_content = REPLACE(post_content, '${from}', '${to}') WHERE post_content LIKE '%${from}%'; -- Example for post_content, adapt for other columns`)
+        .join('\n');
+    })
+    .join('\n\n');
+    
+    const footer = `
+-- Note: The queries above are examples for 'post_content'. You will need to adapt them
+-- for other columns like 'guid', 'post_excerpt', 'meta_value', 'option_value', etc.
+-- A comprehensive search-replace requires checking all text-based columns.
+-- Using the WP-CLI method is strongly recommended for a safer and more complete update.
+`;
+    
+  return header + queries + footer;
+};
+
+
+// =================================================================================
+// --- From services/validationService.ts ---
+// =================================================================================
+const validateGeminiKey = async (apiKey: string): Promise<boolean> => {
+    try {
+        const ai = new GoogleGenAI({ apiKey });
+        await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: 'test',
+        });
+        return true;
+    } catch (error) {
+        console.error("Gemini validation error:", error);
+        return false;
+    }
+};
+
+const validateOpenAIKey = async (apiKey: string, provider: 'openai' | 'openrouter'): Promise<boolean> => {
+    const url = provider === 'openai' ? 'https://api.openai.com/v1/models' : 'https://openrouter.ai/api/v1/models';
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+        });
+        return response.ok;
+    } catch (error) {
+        console.error(`${provider} validation error:`, error);
+        return false;
+    }
+};
+
+const validateClaudeKey = async (apiKey: string): Promise<boolean> => {
+    try {
+        const response = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://api.anthropic.com/v1/messages'), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+                model: "claude-3-haiku-20240307",
+                max_tokens: 1,
+                messages: [{ role: "user", content: "test" }]
+            }),
+        });
+        return response.status === 400 || response.ok;
+    } catch (error) {
+        console.error("Claude validation error:", error);
+        return false;
+    }
+};
+
+const validateApiKey = async (provider: AIProvider, apiKey: string): Promise<boolean> => {
+    if (!apiKey) return false;
+
+    switch (provider) {
+        case 'gemini':
+            return await validateGeminiKey(apiKey);
+        case 'openai':
+            return await validateOpenAIKey(apiKey, 'openai');
+        case 'openrouter':
+            return await validateOpenAIKey(apiKey, 'openrouter');
+        case 'claude':
+            return await validateClaudeKey(apiKey);
+        default:
+            return false;
+    }
+};
+
+// =================================================================================
+// --- From services/aiService.ts ---
+// =================================================================================
+const getSlug = (url: string): string => {
+  try {
+    const path = new URL(url).pathname;
+    const slug = path.startsWith('/') ? path.substring(1) : path;
+    return slug.endsWith('/') ? slug.slice(0, -1) : slug;
+  } catch (e) {
+    return 'invalid-url';
+  }
+};
+
+const getBasePrompt = (geoTarget: string, urls: string[]): string => `
+  You are an expert SEO specialist for WordPress websites. 
+  Your task is to rewrite URL slugs to be more SEO-friendly and geo-targeted.
+  The geo-target is: "${geoTarget}".
+
+  Follow these rules:
+  1.  Create short, descriptive, keyword-rich slugs.
+  2.  Incorporate the geo-target "${geoTarget}" naturally where it makes sense. If the page is not location-specific (e.g., 'about-us', 'contact'), do not force the geo-target.
+  3.  Use hyphens (-) to separate words.
+  4.  Use lowercase letters only.
+  5.  Remove common stop words (e.g., 'a', 'the', 'in').
+  6.  Ensure the new slug is a clear improvement over the old one for SEO.
+  7.  The original URLs provided are: ${urls.join(', ')}.
+`;
+
+const mapResults = (apiResponse: any[], urls: string[]): URLResult[] => {
+  if (!Array.isArray(apiResponse)) {
+    throw new Error("AI response was not a valid JSON array.");
+  }
+  
+  const resultMap = new Map<string, string>();
+  apiResponse.forEach((item: { originalUrl: string; proposedSlug: string; }) => {
+    if (item.originalUrl && item.proposedSlug) {
+      resultMap.set(item.originalUrl, item.proposedSlug);
+    }
+  });
+
+  return urls.map((url, index) => ({
+    id: Date.now() + index,
+    originalUrl: url,
+    currentSlug: getSlug(url),
+    proposedSlug: resultMap.get(url) || getSlug(url),
+  }));
+};
+
+const handleApiError = (error: any, provider: string): never => {
+    console.error(`Error calling ${provider} API:`, error);
+    let message = 'An unknown error occurred.';
+    if (error.message) {
+        message = error.message;
+    }
+    if (error.status === 401) {
+        message = `Authentication failed. Please check your ${provider} API key.`;
+    }
+    throw new Error(message);
+}
+
+const optimizeWithGemini = async (urls: string[], geoTarget: string, config: AIConfig): Promise<URLResult[]> => {
+  const ai = new GoogleGenAI({ apiKey: config.apiKey });
+  const prompt = getBasePrompt(geoTarget, urls) + `
+    Return a JSON array of objects, where each object has two keys: "originalUrl" and "proposedSlug".
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: config.model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              originalUrl: { type: Type.STRING },
+              proposedSlug: { type: Type.STRING },
+            },
+            required: ["originalUrl", "proposedSlug"],
+          },
+        },
+      },
+    });
+    
+    const textResponse = response.text.trim();
+    const result = JSON.parse(textResponse);
+    return mapResults(result, urls);
+
+  } catch (error) {
+    handleApiError(error, 'Gemini');
+  }
+};
+
+const optimizeWithOpenAI = async (urls: string[], geoTarget: string, config: AIConfig): Promise<URLResult[]> => {
+    const prompt = getBasePrompt(geoTarget, urls);
+    const apiURL = config.provider === 'openrouter' 
+        ? 'https://openrouter.ai/api/v1/chat/completions'
+        : 'https://api.openai.com/v1/chat/completions';
+    
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`,
+    };
+
+    if (config.provider === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://wordpress-slug-optimizer.web.app';
+        headers['X-Title'] = 'WP Slug Optimizer';
+    }
+
+    try {
+        const res = await fetch(apiURL, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                model: config.model,
+                messages: [
+                    { role: 'system', content: 'You are an SEO expert. Respond with only a valid JSON array of objects with keys "originalUrl" and "proposedSlug".' },
+                    { role: 'user', content: prompt }
+                ],
+                response_format: { type: 'json_object' }
+            }),
+        });
+        if (!res.ok) {
+            const errorData = await res.json();
+            throw new Error(errorData.error.message || `HTTP error! status: ${res.status}`);
+        }
+        const data = await res.json();
+        const jsonContent = JSON.parse(data.choices[0].message.content);
+        const arrayResult = Array.isArray(jsonContent) ? jsonContent : Object.values(jsonContent).find(Array.isArray);
+        return mapResults(arrayResult || [], urls);
+    } catch(error) {
+        handleApiError(error, config.provider === 'openrouter' ? 'OpenRouter' : 'OpenAI');
+    }
+};
+
+const optimizeWithClaude = async (urls: string[], geoTarget: string, config: AIConfig): Promise<URLResult[]> => {
+    const prompt = getBasePrompt(geoTarget, urls);
+    try {
+        const res = await fetch('https://corsproxy.io/?https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': config.apiKey,
+                'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+                model: config.model,
+                max_tokens: 4096,
+                system: 'You are an SEO expert. Your task is to return a valid JSON array of objects, where each object has "originalUrl" and "proposedSlug" keys. Respond ONLY with the JSON array, without any surrounding text or markdown formatting.',
+                messages: [{ role: 'user', content: prompt }],
+            }),
+        });
+        if (!res.ok) {
+            const errorData = await res.json();
+            throw new Error(errorData.error.message || `HTTP error! status: ${res.status}`);
+        }
+        const data = await res.json();
+        const textContent = data.content[0].text;
+        const jsonResult = JSON.parse(textContent);
+        return mapResults(jsonResult, urls);
+    } catch(error) {
+        handleApiError(error, 'Claude');
+    }
+};
+
+const optimizeSlugs = async (
+  urls: string[], 
+  geoTarget: string,
+  config: AIConfig
+): Promise<URLResult[]> => {
+    try {
+        switch(config.provider) {
+            case 'gemini':
+                return await optimizeWithGemini(urls, geoTarget, config);
+            case 'openai':
+            case 'openrouter':
+                return await optimizeWithOpenAI(urls, geoTarget, config);
+            case 'claude':
+                return await optimizeWithClaude(urls, geoTarget, config);
+            default:
+                throw new Error('Unsupported AI provider');
+        }
+    } catch (error) {
+        console.error("Error during slug optimization:", error);
+        if (error instanceof Error) {
+            throw error;
+        }
+        throw new Error("An unknown error occurred during optimization.");
+    }
+};
+
+
+// =================================================================================
+// --- Components ---
+// =================================================================================
+
+// --- From components/Modal.tsx ---
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  title: string;
+  children: React.ReactNode;
+}
+
+const Modal: React.FC<ModalProps> = ({ isOpen, onClose, onConfirm, title, children }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center" aria-modal="true" role="dialog">
+      <div className="bg-light-card dark:bg-dark-card rounded-lg shadow-xl p-6 w-full max-w-md m-4">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-bold text-light-secondary dark:text-dark-secondary">{title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="mb-6">
+            {children}
+        </div>
+        <div className="flex justify-end space-x-4">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-md text-sm font-medium text-gray-700 bg-gray-200 hover:bg-gray-300 dark:bg-dark-border dark:text-dark-text dark:hover:bg-gray-600"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-md text-sm font-medium text-white bg-light-danger hover:bg-red-700 dark:bg-dark-danger focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+          >
+            I understand, Proceed
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- From components/Toast.tsx ---
+interface ToastProps {
+  toast: ToastMessage | null;
+  onDismiss: () => void;
+}
+const SuccessIcon = () => (<svg xmlns="http://www.w.org/2000/svg" className="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>);
+const ErrorIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>);
+
+const Toast: React.FC<ToastProps> = ({ toast, onDismiss }) => {
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => {
+        onDismiss();
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast, onDismiss]);
+
+  if (!toast) return null;
+  const isSuccess = toast.type === 'success';
+  return (
+    <div
+      className={`fixed top-5 right-5 z-50 flex items-center p-4 mb-4 text-gray-500 bg-white rounded-lg shadow dark:text-gray-400 dark:bg-gray-800 transition-transform transform-gpu ${
+        toast ? 'translate-x-0' : 'translate-x-full'
+      }`}
+      role="alert"
+    >
+        {isSuccess ? <SuccessIcon /> : <ErrorIcon />}
+        <div className="ml-3 text-sm font-normal">{toast.message}</div>
+        <button
+            type="button"
+            className="ml-auto -mx-1.5 -my-1.5 bg-white text-gray-400 hover:text-gray-900 rounded-lg focus:ring-2 focus:ring-gray-300 p-1.5 hover:bg-gray-100 inline-flex h-8 w-8 dark:text-gray-500 dark:hover:text-white dark:bg-gray-800 dark:hover:bg-gray-700"
+            onClick={onDismiss}
+            aria-label="Close"
+        >
+            <span className="sr-only">Close</span>
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+        </button>
+    </div>
+  );
+};
+
+// --- From components/Header.tsx ---
+interface HeaderProps {
+  isDarkMode: boolean;
+  toggleDarkMode: () => void;
+}
+const SunIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-400"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>);
+const MoonIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-light-primary dark:text-dark-primary"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>);
+
+const Header: React.FC<HeaderProps> = ({ isDarkMode, toggleDarkMode }) => {
+  return (
+    <header className="sticky top-0 z-40 w-full py-3 px-8 flex justify-between items-center bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border-b border-light-border dark:border-dark-border shadow-sm">
+      <div className="flex items-center space-x-4">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-light-primary dark:text-dark-primary flex-shrink-0"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.72-1.72"></path></svg>
+        <div>
+          <h1 className="text-2xl font-bold text-light-text dark:text-dark-secondary">
+            AI Slug Optimizer
+          </h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            From <a href="https://affiliatemarketingforsuccess.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-light-primary dark:hover:text-dark-primary">Affiliate Marketing For Success</a>
+          </p>
+        </div>
+      </div>
+      <button
+        onClick={toggleDarkMode}
+        className="p-2 rounded-full bg-gray-200 dark:bg-dark-border focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary dark:focus:ring-dark-primary transition-colors duration-200"
+        aria-label="Toggle theme"
+        title="Toggle Theme"
+      >
+        {isDarkMode ? <SunIcon /> : <MoonIcon />}
+      </button>
+    </header>
+  );
+};
+
+// --- From components/Footer.tsx ---
+const valuableLinks = [
+  { title: 'Build an Effective SEO Strategy', url: 'https://affiliatemarketingforsuccess.com/seo/build-an-effective-seo-strategy/' },
+  { title: 'The Power of AI in SEO', url: 'https://affiliatemarketingforsuccess.com/affiliate-marketing/the-power-of-ai-in-seo/' },
+  { title: 'Website Architecture That Drives Conversions', url: 'https://affiliatemarketingforsuccess.com/seo/website-architecture-that-drives-conversions/' },
+];
+
+const Footer: React.FC = () => {
+  return (
+    <footer className="bg-transparent mt-8 py-6 px-8 border-t border-light-border dark:border-dark-border">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8 text-center md:text-left">
+        <div className="md:col-span-1">
+          <h3 className="font-semibold text-light-text dark:text-dark-secondary">AI Slug Optimizer</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
+            &copy; {new Date().getFullYear()} Affiliate Marketing For Success. All rights reserved.
+          </p>
+        </div>
+        <div className="md:col-span-2">
+          <h3 className="font-semibold text-light-text dark:text-dark-secondary">Learn More About SEO & AI</h3>
+          <ul className="mt-2 space-y-2 text-sm">
+            {valuableLinks.map(link => (
+              <li key={link.url}>
+                <a href={link.url} target="_blank" rel="noopener noreferrer" className="text-light-primary dark:text-dark-primary hover:underline">
+                  {link.title}
+                </a>
+              </li>
+            ))}
+             <li>
+                <a href="https://affiliatemarketingforsuccess.com/blog/" target="_blank" rel="noopener noreferrer" className="text-light-primary dark:text-dark-primary hover:underline font-bold">
+                  Visit Our Blog &rarr;
+                </a>
+              </li>
+          </ul>
+        </div>
+      </div>
+    </footer>
+  );
+};
+
+// --- From components/Hero.tsx ---
+const BrainIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-light-primary dark:text-dark-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h7.5M8.25 12h7.5m-7.5 5.25h7.5M3 13.5a13.43 13.43 0 003.262 9.134.563.563 0 00.916.037l2.102-3.235a1.125 1.125 0 011.942 0l2.102 3.235a.563.563 0 00.916-.037A13.43 13.43 0 0021 13.5a1.125 1.125 0 00-1.125-1.125h-1.5a1.125 1.125 0 01-1.125-1.125V9.375m-10.5 3.375V9.375m-1.5-1.5a1.125 1.125 0 011.125-1.125h1.5a1.125 1.125 0 001.125-1.125V3.375c0-.621-.504-1.125-1.125-1.125h-1.5A1.125 1.125 0 006 3.375v3.375c0 .621.504 1.125 1.125 1.125h1.5m6-4.875a1.125 1.125 0 011.125-1.125h1.5a1.125 1.125 0 011.125 1.125v3.375c0 .621-.504 1.125-1.125 1.125h-1.5a1.125 1.125 0 00-1.125 1.125V9.375" /></svg>);
+const PluginIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-light-primary dark:text-dark-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m.75 12l3 3m0 0l3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>);
+const CodeIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-light-primary dark:text-dark-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" /></svg>);
+const heroFeatures = [
+  { icon: <BrainIcon />, title: 'Multi-AI Engine Access', description: 'Leverage the best AI for the job. Choose from top-tier models by Google, OpenAI, Anthropic, and more via OpenRouter.' },
+  { icon: <PluginIcon />, title: 'One-Click Plugin Export', description: 'The safest implementation method. Generate a custom WordPress plugin to handle all 301 redirects instantly and without errors.' },
+  { icon: <CodeIcon />, title: 'Pro-Developer Toolkit', description: 'For advanced users. Export your results as WP-CLI commands or raw SQL scripts for granular control and integration.' },
+];
+const Hero: React.FC = () => {
+  return (
+    <div className="py-16 px-4 sm:px-6 lg:px-8">
+      <div className="text-center">
+        <h1 className="text-4xl md:text-5xl font-extrabold text-light-text dark:text-dark-secondary mb-4 tracking-tight">
+          Transform Your SEO with AI-Powered URL Optimization
+        </h1>
+        <p className="max-w-4xl mx-auto mt-6 text-xl font-semibold text-transparent bg-clip-text bg-gradient-to-r from-light-primary to-green-500 dark:from-dark-primary dark:to-green-400">
+          The only optimizer that generates a ready-to-install WordPress plugin for instant, safe, 301 redirects.
+        </p>
+      </div>
+      <div className="mt-20 max-w-7xl mx-auto grid gap-8 md:grid-cols-3">
+        {heroFeatures.map((feature, index) => (
+          <div key={index} className="bg-light-card/70 dark:bg-dark-card/70 backdrop-blur-xl p-8 rounded-2xl shadow-xl border border-black/5 dark:border-white/5 text-center">
+            <div className="flex items-center justify-center h-12 w-12 rounded-lg bg-light-primary/10 dark:bg-dark-primary/20 mx-auto">{feature.icon}</div>
+            <h3 className="mt-6 text-lg font-bold text-light-text dark:text-dark-secondary">{feature.title}</h3>
+            <p className="mt-2 text-base text-gray-600 dark:text-gray-400">{feature.description}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-20 max-w-3xl mx-auto">
+        <figure className="bg-light-card/70 dark:bg-dark-card/70 backdrop-blur-xl p-8 rounded-2xl shadow-xl border border-black/5 dark:border-white/5">
+          <blockquote className="text-center text-xl font-medium leading-9 text-light-text dark:text-dark-text"><p>"This is the only tool that understood I needed a safe, foolproof way to implement hundreds of redirects. The plugin generation is a game-changer. It saved me a full day of tedious, high-risk database work."</p></blockquote>
+          <figcaption className="mt-8"><div className="text-center text-base text-gray-600 dark:text-gray-400"><span className="font-bold">Sarah L.</span> – Senior WordPress Developer</div></figcaption>
+        </figure>
+      </div>
+    </div>
+  );
+};
+
+// --- From components/ApiConfigCard.tsx ---
+interface ApiConfigCardProps {
+  config: AIConfig;
+  setConfig: React.Dispatch<React.SetStateAction<AIConfig>>;
+  validationStatus: Record<AIProvider, KeyValidationStatus>;
+  onValidate: (provider: AIProvider, apiKey: string) => void;
+}
+const ValidatingIcon = () => <svg className="animate-spin h-5 w-5 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>;
+const ValidIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-light-success dark:text-dark-success" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>;
+const InvalidIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-light-danger dark:text-dark-danger" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>;
+
+const ApiConfigCard: React.FC<ApiConfigCardProps> = ({ config, setConfig, validationStatus, onValidate }) => {
+  const currentProvider = config.provider;
+  const currentStatus = validationStatus[currentProvider];
+  
+  const handleProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newProvider = e.target.value as AIProvider;
+    const newModel = AI_MODELS[newProvider]?.[0]?.value || '';
+    setConfig(prev => ({ ...prev, provider: newProvider, model: newModel }));
+  };
+
+  return (
+    <div className="bg-light-card dark:bg-dark-card backdrop-blur-lg p-6 rounded-2xl shadow-xl border border-black/5 dark:border-white/5">
+      <h2 className="text-xl font-semibold mb-4 text-light-text dark:text-dark-secondary">1. Configure AI Provider</h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label htmlFor="aiProvider" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">AI Provider</label>
+          <select id="aiProvider" value={currentProvider} onChange={handleProviderChange} className="w-full p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary">
+            {AI_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        <div>
+            <label htmlFor="model" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">Model</label>
+            {currentProvider === 'openrouter' ? (
+                 <input type="text" id="model" value={config.model} onChange={(e) => setConfig(prev => ({...prev, model: e.target.value}))} className="w-full p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary" placeholder="e.g., mistralai/mistral-7b-instruct" />
+            ) : (
+                <select id="model" value={config.model} onChange={(e) => setConfig(prev => ({...prev, model: e.target.value}))} className="w-full p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary">
+                    {AI_MODELS[currentProvider].map(m => <option key={m.value} value={m.value}>{m.name}</option>)}
+                </select>
+            )}
+        </div>
+      </div>
+      <div className="mt-4">
+        <label htmlFor="apiKey" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">{AI_PROVIDERS.find(p => p.id === currentProvider)?.name} API Key</label>
+        <div className="flex items-center gap-2">
+          <input id="apiKey" type="password" value={config.apiKey} onChange={(e) => setConfig(prev => ({...prev, apiKey: e.target.value}))} className="flex-grow p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary" placeholder="Enter your API key" />
+           <div className="flex-shrink-0 w-28 text-center">
+            <button onClick={() => onValidate(currentProvider, config.apiKey)} disabled={!config.apiKey || currentStatus === 'validating'} className="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-light-primary hover:bg-light-primary-hover dark:bg-dark-primary dark:hover:bg-dark-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary disabled:bg-gray-400">
+                {currentStatus === 'validating' ? <ValidatingIcon/> : 'Validate'}
+            </button>
+           </div>
+           <div className="w-20 flex items-center gap-2 text-sm">
+                {currentStatus === 'valid' && <><ValidIcon /> <span className="text-light-success dark:text-dark-success">Valid</span></>}
+                {currentStatus === 'invalid' && <><InvalidIcon /> <span className="text-light-danger dark:text-dark-danger">Invalid</span></>}
+           </div>
+        </div>
+         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Your API key is stored securely in your browser's local storage and is never sent to our servers.</p>
+      </div>
+    </div>
+  );
+};
+
+// --- From components/InputCard.tsx ---
+interface InputCardProps {
+  onOptimize: (sitemapUrl: string, geoTarget: string) => void;
+  isLoading: boolean;
+  progressMessage: string;
+  disabled: boolean;
+}
+const LoadingIcon = () => (<svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>);
+
+const InputCard: React.FC<InputCardProps> = ({ onOptimize, isLoading, progressMessage, disabled }) => {
+  const [sitemapUrl, setSitemapUrl] = useState('');
+  const [geoTarget, setGeoTarget] = useState('');
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (sitemapUrl.trim() && geoTarget.trim()) {
+      onOptimize(sitemapUrl.trim(), geoTarget.trim());
+    }
+  };
+  return (
+    <div className={`bg-light-card dark:bg-dark-card backdrop-blur-lg p-6 rounded-2xl shadow-xl border border-black/5 dark:border-white/5 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+      <h2 className="text-xl font-semibold mb-4 text-light-text dark:text-dark-secondary">2. Input Your Data</h2>
+      <form onSubmit={handleSubmit}>
+        <div className="mb-4">
+          <label htmlFor="sitemapUrl" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">Enter Sitemap URL</label>
+          <input id="sitemapUrl" type="url" value={sitemapUrl} onChange={(e) => setSitemapUrl(e.target.value)} className="w-full p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary" placeholder="https://example.com/sitemap.xml" disabled={isLoading || disabled} required />
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">The app will automatically crawl your sitemap to find all published pages. We use a proxy to handle common access issues.</p>
+        </div>
+        <div className="mb-4">
+          <label htmlFor="geoTarget" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">Geo-Target (e.g., "San Francisco", "London")</label>
+          <input type="text" id="geoTarget" value={geoTarget} onChange={(e) => setGeoTarget(e.target.value)} className="w-full p-2 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-2 focus:ring-light-primary dark:focus:ring-dark-primary" placeholder="Enter city, state, or region" disabled={isLoading || disabled} required />
+        </div>
+        <div className="flex items-center justify-between">
+            <button type="submit" disabled={isLoading || disabled || !sitemapUrl || !geoTarget} className="inline-flex items-center px-8 py-3 border border-transparent text-base font-medium rounded-xl shadow-lg text-white bg-light-primary hover:bg-light-primary-hover dark:bg-dark-primary dark:hover:bg-dark-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary dark:focus:ring-dark-primary disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed transform hover:scale-105 transition-transform duration-200">
+                {isLoading && <LoadingIcon />}
+                {isLoading ? 'Processing...' : 'Crawl & Optimize Slugs'}
+            </button>
+            {isLoading && (<div className="text-sm text-light-text dark:text-dark-text font-medium">{progressMessage}</div>)}
+        </div>
+      </form>
+    </div>
+  );
+};
+
+// --- From components/ResultsTable.tsx ---
+interface ResultsTableProps {
+  results: URLResult[];
+  onUpdateResult: (id: number, newSlug: string) => void;
+}
+const ResultsTable: React.FC<ResultsTableProps> = ({ results, onUpdateResult }) => {
+  const [visibleCount, setVisibleCount] = useState(INITIAL_DISPLAY_COUNT);
+  if (results.length === 0) return null;
+  const visibleResults = results.slice(0, visibleCount);
+  return (
+    <div className="bg-light-card dark:bg-dark-card backdrop-blur-lg p-6 rounded-2xl shadow-xl border border-black/5 dark:border-white/5">
+      <h2 className="text-xl font-semibold mb-4 text-light-text dark:text-dark-secondary">3. Review & Refine Slugs</h2>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-light-border dark:divide-dark-border">
+          <thead className="bg-gray-50/50 dark:bg-slate-900/50">
+            <tr>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Original URL</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Current Slug</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Proposed Slug (Editable)</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-light-border dark:divide-dark-border">
+            {visibleResults.map((result) => (
+              <tr key={result.id} className="hover:bg-gray-50/20 dark:hover:bg-slate-800/20">
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-light-text dark:text-dark-text truncate max-w-xs"><a href={result.originalUrl} target="_blank" rel="noopener noreferrer" className="hover:text-light-primary dark:hover:text-dark-primary">{result.originalUrl}</a></td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">/{result.currentSlug}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm"><input type="text" value={result.proposedSlug} onChange={(e) => onUpdateResult(result.id, e.target.value)} className="w-full p-1 border rounded-md bg-gray-50 dark:bg-slate-900/80 dark:border-dark-border text-light-text dark:text-dark-text focus:ring-1 focus:ring-light-primary dark:focus:ring-dark-primary" /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {visibleCount < results.length && (
+        <div className="mt-4 text-center"><button onClick={() => setVisibleCount(prev => prev + INITIAL_DISPLAY_COUNT)} className="px-4 py-2 border border-light-border dark:border-dark-border text-sm font-medium rounded-md text-light-primary dark:text-dark-primary hover:bg-gray-50/50 dark:hover:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-light-primary">Load More Results</button></div>
+      )}
+    </div>
+  );
+};
+
+// --- From components/ExportCard.tsx ---
+interface ExportCardProps {
+  results: URLResult[];
+  onShowToast: (message: string, type?: 'success' | 'error') => void;
+}
+const CopyIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>);
+const DownloadIcon = () => (<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>);
+
+const ExportCard: React.FC<ExportCardProps> = ({ results, onShowToast }) => {
+  const [activeTab, setActiveTab] = useState<ExportType>(ExportType.PLUGIN);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  if (results.length === 0) return null;
+  
+  const handleCopy = (content: string) => {
+    navigator.clipboard.writeText(content);
+    onShowToast('Copied to clipboard!');
+  };
+  const handleDownloadPlugin = () => {
+    generatePluginZip(results);
+    onShowToast('Plugin download started!');
+  };
+  const handleShowSql = () => setIsModalOpen(true);
+  const handleConfirmSql = () => {
+    setIsModalOpen(false);
+    setActiveTab(ExportType.SQL);
+  };
+  const getTabClassName = (tab: ExportType) => `px-4 py-2 text-sm font-medium rounded-md focus:outline-none transition-colors duration-200 ${activeTab === tab ? 'bg-light-primary text-white dark:bg-dark-primary' : 'text-gray-600 hover:bg-gray-200/50 dark:text-dark-text dark:hover:bg-dark-border/50'}`;
+  const wpCliContent = generateWpCliCommands(results);
+  const sqlContent = generateSqlScript(results);
+
+  return (
+    <div className="bg-light-card dark:bg-dark-card backdrop-blur-lg p-6 rounded-2xl shadow-xl border border-black/5 dark:border-white/5">
+      <h2 className="text-xl font-semibold mb-4 text-light-text dark:text-dark-secondary">4. Export & Implement</h2>
+      <div className="mb-4 border-b border-light-border dark:border-dark-border">
+          <nav className="flex space-x-2" aria-label="Tabs">
+            <button onClick={() => setActiveTab(ExportType.PLUGIN)} className={getTabClassName(ExportType.PLUGIN)}>WordPress Plugin (Safe)</button>
+            <button onClick={() => setActiveTab(ExportType.WP_CLI)} className={getTabClassName(ExportType.WP_CLI)}>WP-CLI Commands (Advanced)</button>
+            <button onClick={handleShowSql} className={getTabClassName(ExportType.SQL)}>SQL Script (Expert)</button>
+          </nav>
+      </div>
+      <div>
+        {activeTab === ExportType.PLUGIN && (<div><p className="text-sm mb-4 text-light-text dark:text-dark-text">This is the safest method. Download the generated plugin, upload it to your WordPress site, and activate it. It will automatically create 301 redirects from the old URLs to the new ones, preserving your SEO value.</p><button onClick={handleDownloadPlugin} className="inline-flex items-center gap-2 px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-light-success hover:bg-green-700 dark:bg-dark-success focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"><DownloadIcon/> Download Plugin.zip</button></div>)}
+        {activeTab === ExportType.WP_CLI && (<div><p className="text-sm mb-4 text-light-text dark:text-dark-text">For developers. Run these commands via SSH on your server. This performs a comprehensive search-and-replace in your database. Always make a backup first: `wp db export`</p><div className="relative"><pre className="bg-gray-100 dark:bg-slate-900/80 text-light-text dark:text-dark-text p-4 rounded-md overflow-x-auto max-h-60"><code>{wpCliContent}</code></pre><button onClick={() => handleCopy(wpCliContent)} className="absolute top-2 right-2 p-2 rounded-md bg-gray-300 dark:bg-dark-border hover:bg-gray-400 dark:hover:bg-gray-600"><CopyIcon/></button></div></div>)}
+        {activeTab === ExportType.SQL && (<div><div className="p-4 mb-4 text-sm text-red-800 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-400" role="alert"><span className="font-medium">Danger!</span> This is a high-risk operation. Running incorrect SQL can break your site. You must manually adapt these queries for all necessary database columns. The WP-CLI method is strongly preferred.</div><div className="relative"><pre className="bg-gray-100 dark:bg-slate-900/80 text-light-text dark:text-dark-text p-4 rounded-md overflow-x-auto max-h-60"><code>{sqlContent}</code></pre><button onClick={() => handleCopy(sqlContent)} className="absolute top-2 right-2 p-2 rounded-md bg-gray-300 dark:bg-dark-border hover:bg-gray-400 dark:hover:bg-gray-600"><CopyIcon/></button></div></div>)}
+      </div>
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onConfirm={handleConfirmSql} title="SQL Script Warning"><p className="text-sm text-light-text dark:text-dark-text">Generating a raw SQL script is extremely risky and can cause permanent data loss if used incorrectly.<br/><br/>Please confirm that you have created a complete backup of your WordPress database before proceeding.</p></Modal>
+    </div>
+  );
+};
+
+
+// =================================================================================
+// --- App.tsx ---
+// =================================================================================
+const getInitialConfig = (): AIConfig => {
+  try {
+    const storedConfig = localStorage.getItem('aiConfig');
+    if (storedConfig) return JSON.parse(storedConfig);
+  } catch (e) { console.error("Could not parse stored AI config", e); }
+  return { provider: 'gemini', apiKey: '', model: AI_MODELS.gemini[0].value };
+};
+
+const getInitialValidationStatus = (): Record<AIProvider, KeyValidationStatus> => {
+  try {
+    const stored = localStorage.getItem('keyValidationStatus');
+    if (stored) return JSON.parse(stored);
+  } catch (e) { console.error("Could not parse stored key validation status", e); }
+  return AI_PROVIDERS.reduce((acc, p) => ({ ...acc, [p.id]: 'idle' }), {} as Record<AIProvider, KeyValidationStatus>);
+};
+
+
+const App: React.FC = () => {
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [results, setResults] = useState<URLResult[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [progressMessage, setProgressMessage] = useState('');
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [aiConfig, setAiConfig] = useState<AIConfig>(getInitialConfig);
+  const [keyValidationStatus, setKeyValidationStatus] = useState<Record<AIProvider, KeyValidationStatus>>(getInitialValidationStatus);
+
+  useEffect(() => {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    setIsDarkMode(prefersDark);
+  }, []);
+
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    localStorage.setItem('aiConfig', JSON.stringify(aiConfig));
+  }, [aiConfig]);
+
+  useEffect(() => {
+    localStorage.setItem('keyValidationStatus', JSON.stringify(keyValidationStatus));
+  }, [keyValidationStatus]);
+
+
+  const toggleDarkMode = () => setIsDarkMode(prev => !prev);
+  
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ id: Date.now(), message, type });
+  }, []);
+
+  const handleValidateKey = async (provider: AIProvider, apiKey: string) => {
+    if (!apiKey) {
+      setKeyValidationStatus(prev => ({ ...prev, [provider]: 'idle' }));
+      return;
+    }
+    setKeyValidationStatus(prev => ({ ...prev, [provider]: 'validating' }));
+    const isValid = await validateApiKey(provider, apiKey);
+    setKeyValidationStatus(prev => ({ ...prev, [provider]: isValid ? 'valid' : 'invalid' }));
+    if (isValid) {
+      showToast(`${AI_PROVIDERS.find(p => p.id === provider)?.name} API key is valid!`);
+    } else {
+      showToast(`${AI_PROVIDERS.find(p => p.id === provider)?.name} API key is invalid.`, 'error');
+    }
+  };
+
+  const handleOptimize = async (sitemapUrl: string, geoTarget: string) => {
+    setIsLoading(true);
+    setResults([]);
+    
+    try {
+      setProgressMessage('Crawling sitemap, this may take a moment...');
+      const urls = await fetchUrlsFromSitemap(sitemapUrl);
+      
+      if (urls.length === 0) {
+        showToast('No URLs found in the provided sitemap.', 'error');
+        setIsLoading(false);
+        setProgressMessage('');
+        return;
+      }
+      
+      showToast(`Found ${urls.length} URLs. Starting optimization...`, 'success');
+      const totalUrls = urls.length;
+
+      for (let i = 0; i < totalUrls; i += URL_BATCH_SIZE) {
+        const batch = urls.slice(i, i + URL_BATCH_SIZE);
+        const start = i + 1;
+        const end = Math.min(i + URL_BATCH_SIZE, totalUrls);
+        setProgressMessage(`Analyzing URLs ${start}-${end} of ${totalUrls}...`);
+        
+        const batchResults = await optimizeSlugs(batch, geoTarget, aiConfig);
+        setResults(prev => [...prev, ...batchResults]);
+      }
+      showToast('Optimization complete!', 'success');
+    } catch (error) {
+      console.error(error);
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
+      showToast(`Error: ${errorMessage}`, 'error');
+    } finally {
+      setIsLoading(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleUpdateResult = (id: number, newSlug: string) => {
+    setResults(prevResults =>
+      prevResults.map(r => (r.id === id ? { ...r, proposedSlug: newSlug } : r))
+    );
+  };
+
+  const isKeyValid = keyValidationStatus[aiConfig.provider] === 'valid';
+
+  return (
+    <div className="min-h-screen text-light-text dark:text-dark-text font-sans flex flex-col">
+      <Header isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} />
+      <main className="p-4 sm:p-8 max-w-7xl mx-auto w-full flex-grow">
+        
+        {!isLoading && results.length === 0 && <Hero />}
+
+        <div className="space-y-8 mt-8">
+          <ApiConfigCard
+            config={aiConfig}
+            setConfig={setAiConfig}
+            validationStatus={keyValidationStatus}
+            onValidate={handleValidateKey}
+          />
+          <InputCard onOptimize={handleOptimize} isLoading={isLoading} progressMessage={progressMessage} disabled={!isKeyValid} />
+          
+          {results.length > 0 && (
+            <>
+              <ResultsTable results={results} onUpdateResult={handleUpdateResult} />
+              <ExportCard results={results} onShowToast={showToast} />
+            </>
+          )}
+
+        </div>
+      </main>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
+      <Footer />
+    </div>
+  );
+};
+
+
+// =================================================================================
+// --- Root Render ---
+// =================================================================================
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
