@@ -11,9 +11,8 @@ export const Footer: React.FC = () => {
     <footer className="bg-transparent mt-8 py-6 px-8 border-t border-light-border dark:border-dark-border">
       <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8 text-center md:text-left">
         <div className="md:col-span-1">
-          <h3 className="font-semibold text-light-text dark:text-dark-secondary">AI Slug Optimizer</h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
-            &copy; {new Date().getFullYear()} Affiliate Marketing For Success. All rights reserved.
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            &copy; 2025 Affiliate Marketing For Success. All rights reserved.
           </p>
         </div>
         <div className="md:col-span-2">

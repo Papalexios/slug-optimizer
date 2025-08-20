@@ -7,6 +7,7 @@ import { Toast } from './components/Toast.tsx';
 import { ApiConfigCard } from './components/ApiConfigCard.tsx';
 import { Footer } from './components/Footer.tsx';
 import { Hero } from './components/Hero.tsx';
+import { ArsenalSection } from './components/ArsenalSection.tsx';
 import { URLResult, ToastMessage, AIProvider, KeyValidationStatus, AIConfig } from './types.ts';
 import { optimizeSlugs } from './services/aiService.ts';
 import { fetchUrlsFromSitemap } from './services/sitemapService.ts';
@@ -140,22 +141,34 @@ const App: React.FC = () => {
         
         {!isLoading && results.length === 0 && <Hero />}
 
-        <div className="space-y-8 mt-8">
-          <ApiConfigCard
-            config={aiConfig}
-            setConfig={setAiConfig}
-            validationStatus={keyValidationStatus}
-            onValidate={handleValidateKey}
-          />
-          <InputCard onOptimize={handleOptimize} isLoading={isLoading} progressMessage={progressMessage} disabled={!isKeyValid} />
-          
-          {results.length > 0 && (
-            <>
-              <ResultsTable results={results} onUpdateResult={handleUpdateResult} />
-              <ExportCard results={results} onShowToast={showToast} />
-            </>
-          )}
+        {/* --- APP WORKBENCH START --- */}
+        <div className="relative mt-12 border-2 border-dashed border-light-primary/40 dark:border-dark-primary/40 rounded-3xl bg-light-card/40 dark:bg-dark-card/40 shadow-2xl backdrop-blur-lg">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-100 dark:bg-slate-800 px-6 py-1 rounded-full border border-light-border dark:border-dark-border">
+            <h2 className="text-xl font-bold text-center text-light-primary dark:text-dark-primary tracking-tight">
+              Optimization Workbench
+            </h2>
+          </div>
+          <div className="space-y-8 p-4 sm:p-8 mt-8">
+            <ApiConfigCard
+              config={aiConfig}
+              setConfig={setAiConfig}
+              validationStatus={keyValidationStatus}
+              onValidate={handleValidateKey}
+            />
+            <InputCard onOptimize={handleOptimize} isLoading={isLoading} progressMessage={progressMessage} disabled={!isKeyValid} />
+            
+            {results.length > 0 && (
+              <>
+                <ResultsTable results={results} onUpdateResult={handleUpdateResult} />
+                <ExportCard results={results} onShowToast={showToast} />
+              </>
+            )}
+          </div>
+        </div>
+        {/* --- APP WORKBENCH END --- */}
 
+        <div className="mt-16">
+          <ArsenalSection />
         </div>
       </main>
       <Toast toast={toast} onDismiss={() => setToast(null)} />
