@@ -20,7 +20,7 @@ export const ApiConfigCard: React.FC<ApiConfigCardProps> = ({ config, setConfig,
   const handleProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newProvider = e.target.value as AIProvider;
     const newModel = AI_MODELS[newProvider]?.[0]?.value || '';
-    setConfig(prev => ({ ...prev, provider: newProvider, model: newModel }));
+    setConfig(prev => ({ ...prev, provider: newProvider, model: newModel, apiKey: '' }));
   };
 
   return (
@@ -68,17 +68,6 @@ export const ApiConfigCard: React.FC<ApiConfigCardProps> = ({ config, setConfig,
         </div>
       </div>
       <div className="mt-4">
-        {currentProvider === 'gemini' ? (
-          <div className="bg-blue-50 dark:bg-sky-900/30 border border-blue-200 dark:border-sky-700 text-blue-800 dark:text-sky-200 px-4 py-3 rounded-lg" role="alert">
-            <div className="flex">
-                <div className="py-1"><svg className="fill-current h-6 w-6 text-blue-500 dark:text-sky-400 mr-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M2.93 17.07A10 10 0 1 1 17.07 2.93 10 10 0 0 1 2.93 17.07zM9 11v4h2v-4H9zm0-4h2v2H9V7z"/></svg></div>
-                <div>
-                    <p className="font-bold">Google Gemini is Pre-configured</p>
-                    <p className="text-sm">The API key for Gemini is securely managed. No setup is required.</p>
-                </div>
-            </div>
-          </div>
-        ) : (
           <>
             <label htmlFor="apiKey" className="block text-sm font-medium text-light-text dark:text-dark-text mb-2">
               {AI_PROVIDERS.find(p => p.id === currentProvider)?.name} API Key
@@ -110,7 +99,6 @@ export const ApiConfigCard: React.FC<ApiConfigCardProps> = ({ config, setConfig,
                 Your API key is stored securely in your browser's local storage and is never sent to our servers.
               </p>
           </>
-        )}
       </div>
     </div>
   );

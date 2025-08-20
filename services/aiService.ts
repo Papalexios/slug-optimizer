@@ -59,8 +59,7 @@ const handleApiError = (error: any, provider: string): never => {
 }
 
 const optimizeWithGemini = async (urls: string[], geoTarget: string, config: AIConfig): Promise<URLResult[]> => {
-  // Per guidelines, Gemini API key is sourced from environment variables, not user input.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: config.apiKey });
   const prompt = getBasePrompt(geoTarget, urls) + `
     Return a JSON array of objects, where each object has two keys: "originalUrl" and "proposedSlug".
   `;
